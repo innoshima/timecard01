@@ -1,13 +1,15 @@
-import { useState, useEffect } from 'react'
-import { Calendar, Clock, DollarSign, Download, Trash2, Plus, User, Copy, Key, LogOut } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { Calendar, Clock, DollarSign, Download, Trash2, Plus, User, Copy, Key, LogOut, WifiOff, Wifi, AlertCircle } from 'lucide-react'
 import { TimeCardEntry } from './types'
-import { db } from './firebase'
+import { db, isFirebaseConfigured } from './firebase'
 import { doc, setDoc, onSnapshot } from 'firebase/firestore'
 
 function App() {
   const [accessCode, setAccessCode] = useState('')
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [currentAccessCode, setCurrentAccessCode] = useState('')
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'error'>('disconnected')
+  const [statusMessage, setStatusMessage] = useState('')
 
   const [entries, setEntries] = useState<TimeCardEntry[]>([])
   const [date, setDate] = useState(() => {
@@ -19,6 +21,10 @@ function App() {
   const [endTime, setEndTime] = useState('')
   const [hourlyWage, setHourlyWage] = useState<number>(1000)
 
+  // Firestore保存のデバウンス用
+  const saveTimeoutRef = useRef<NodeJS.Timeout>()
+  const isInitialLoadRef = useRef(true)
+
   // アクセスコードの確認とログイン
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault()
@@ -26,6 +32,16 @@ function App() {
       alert('アクセスコードは4文字以上で入力してください')
       return
     }
+
+    if (!isFirebaseConfigured()) {
+      const confirmLogin = window.confirm(
+        'Firebase設定が完了していません。\n' +
+        'データはブラウザのLocalStorageのみに保存され、他の端末と共有できません。\n\n' +
+        'それでもログインしますか？'
+      )
+      if (!confirmLogin) return
+    }
+
     setCurrentAccessCode(accessCode.trim())
     setIsAuthenticated(true)
     localStorage.setItem('timecardAccessCode', accessCode.trim())
@@ -37,6 +53,8 @@ function App() {
     setCurrentAccessCode('')
     setAccessCode('')
     setEntries([])
+    setConnectionStatus('disconnected')
+    setStatusMessage('')
     localStorage.removeItem('timecardAccessCode')
   }
 
@@ -52,53 +70,121 @@ function App() {
 
   // Firestoreからデータをリアルタイムで取得
   useEffect(() => {
-    if (!isAuthenticated || !currentAccessCode) return
+    if (!isAuthenticated || !currentAccessCode || !db) return
 
+    console.log('Setting up Firestore listener for:', currentAccessCode)
     const docRef = doc(db, 'timecards', currentAccessCode)
 
     // リアルタイムリスナーを設定
-    const unsubscribe = onSnapshot(docRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data()
-        setEntries(data.entries || [])
-      } else {
-        // ドキュメントが存在しない場合は作成
-        setDoc(docRef, { entries: [] })
-        setEntries([])
-      }
-    }, (error) => {
-      console.error('Firestore error:', error)
-      // エラーが発生した場合はLocalStorageから読み込む
-      const savedEntries = localStorage.getItem('timecardEntries')
-      if (savedEntries) {
-        setEntries(JSON.parse(savedEntries))
-      }
-    })
+    const unsubscribe = onSnapshot(
+      docRef,
+      (docSnap) => {
+        console.log('Firestore snapshot received:', docSnap.exists())
+        setConnectionStatus('connected')
+        setStatusMessage('クラウドに接続されています')
 
-    return () => unsubscribe()
+        if (docSnap.exists()) {
+          const data = docSnap.data()
+          console.log('Data from Firestore:', data.entries?.length || 0, 'entries')
+          setEntries(data.entries || [])
+          // LocalStorageにもバックアップ
+          localStorage.setItem('timecardEntries', JSON.stringify(data.entries || []))
+        } else {
+          console.log('Document does not exist, creating new one')
+          // ドキュメントが存在しない場合は空で作成
+          setDoc(docRef, {
+            entries: [],
+            createdAt: new Date().toISOString(),
+            lastUpdated: new Date().toISOString()
+          }).then(() => {
+            console.log('New document created')
+            setEntries([])
+          }).catch((error) => {
+            console.error('Failed to create document:', error)
+            setConnectionStatus('error')
+            setStatusMessage('ドキュメント作成エラー: ' + error.message)
+          })
+        }
+
+        isInitialLoadRef.current = false
+      },
+      (error) => {
+        console.error('Firestore listener error:', error)
+        setConnectionStatus('error')
+        setStatusMessage('Firebase接続エラー: ' + error.message)
+
+        // エラーが発生した場合はLocalStorageから読み込む
+        const savedEntries = localStorage.getItem('timecardEntries')
+        if (savedEntries) {
+          try {
+            setEntries(JSON.parse(savedEntries))
+            setStatusMessage('LocalStorageから読み込みました（オフライン）')
+          } catch (e) {
+            console.error('Failed to parse localStorage data:', e)
+          }
+        }
+      }
+    )
+
+    return () => {
+      console.log('Cleaning up Firestore listener')
+      unsubscribe()
+    }
   }, [isAuthenticated, currentAccessCode])
 
-  // データが変更されたらFirestoreに保存
+  // データが変更されたらFirestoreに保存（デバウンス付き）
   useEffect(() => {
-    if (!isAuthenticated || !currentAccessCode || entries.length === 0) return
+    // 初期ロード時はスキップ
+    if (isInitialLoadRef.current || !isAuthenticated || !currentAccessCode || !db) {
+      return
+    }
 
-    const saveToFirestore = async () => {
+    console.log('Data changed, scheduling save...', entries.length, 'entries')
+
+    // 既存のタイマーをクリア
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current)
+    }
+
+    // 500ms後に保存（デバウンス）
+    saveTimeoutRef.current = setTimeout(async () => {
       try {
         const docRef = doc(db, 'timecards', currentAccessCode)
+        console.log('Saving to Firestore:', entries.length, 'entries')
+
         await setDoc(docRef, {
           entries,
           lastUpdated: new Date().toISOString()
-        })
+        }, { merge: true })
+
+        console.log('Successfully saved to Firestore')
+        setConnectionStatus('connected')
+        setStatusMessage('保存完了')
+
         // バックアップとしてLocalStorageにも保存
         localStorage.setItem('timecardEntries', JSON.stringify(entries))
-      } catch (error) {
+
+        // 3秒後にメッセージをクリア
+        setTimeout(() => {
+          if (statusMessage === '保存完了') {
+            setStatusMessage('クラウドに接続されています')
+          }
+        }, 3000)
+      } catch (error: any) {
         console.error('Failed to save to Firestore:', error)
+        setConnectionStatus('error')
+        setStatusMessage('保存エラー: ' + error.message)
+
         // Firestoreに保存できない場合はLocalStorageに保存
         localStorage.setItem('timecardEntries', JSON.stringify(entries))
       }
-    }
+    }, 500)
 
-    saveToFirestore()
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current)
+      }
+    }
   }, [entries, isAuthenticated, currentAccessCode])
 
   // 勤務時間と日当を計算
@@ -243,6 +329,39 @@ function App() {
     document.body.removeChild(link)
   }
 
+  // 接続ステータス表示コンポーネント
+  const ConnectionStatusBadge = () => {
+    if (!isAuthenticated) return null
+
+    let icon
+    let bgColor
+    let textColor
+
+    switch (connectionStatus) {
+      case 'connected':
+        icon = <Wifi className="w-4 h-4" />
+        bgColor = 'bg-green-100'
+        textColor = 'text-green-800'
+        break
+      case 'error':
+        icon = <AlertCircle className="w-4 h-4" />
+        bgColor = 'bg-red-100'
+        textColor = 'text-red-800'
+        break
+      default:
+        icon = <WifiOff className="w-4 h-4" />
+        bgColor = 'bg-gray-100'
+        textColor = 'text-gray-800'
+    }
+
+    return (
+      <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${bgColor} ${textColor}`}>
+        {icon}
+        <span className="text-sm font-medium">{statusMessage || '接続中...'}</span>
+      </div>
+    )
+  }
+
   // ログイン画面
   if (!isAuthenticated) {
     return (
@@ -256,6 +375,17 @@ function App() {
               </h1>
               <p className="text-gray-600">アクセスコードを入力してください</p>
             </div>
+
+            {!isFirebaseConfigured() && (
+              <div className="mb-6 p-4 bg-yellow-50 border-2 border-yellow-200 rounded-lg">
+                <div className="flex gap-2">
+                  <AlertCircle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
+                  <div className="text-sm text-yellow-800">
+                    <strong>Firebase未設定:</strong> データはこのブラウザのみに保存されます。他の端末と共有するには、READMEの手順に従ってFirebaseを設定してください。
+                  </div>
+                </div>
+              </div>
+            )}
 
             <form onSubmit={handleLogin} className="space-y-6">
               <div>
@@ -302,22 +432,25 @@ function App() {
       <div className="max-w-6xl mx-auto">
         {/* ヘッダー */}
         <div className="bg-white rounded-2xl shadow-xl p-6 mb-6">
-          <div className="flex justify-between items-center">
+          <div className="flex justify-between items-start mb-4">
             <div>
               <h1 className="text-3xl md:text-4xl font-bold text-gray-800 mb-2">
                 居酒屋タイムカード
               </h1>
               <p className="text-gray-600">給与計算システム</p>
             </div>
-            <button
-              onClick={handleLogout}
-              className="bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 flex items-center gap-2"
-            >
-              <LogOut className="w-4 h-4" />
-              ログアウト
-            </button>
+            <div className="flex gap-2">
+              <ConnectionStatusBadge />
+              <button
+                onClick={handleLogout}
+                className="bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 flex items-center gap-2"
+              >
+                <LogOut className="w-4 h-4" />
+                ログアウト
+              </button>
+            </div>
           </div>
-          <div className="mt-4 p-3 bg-indigo-50 rounded-lg">
+          <div className="p-3 bg-indigo-50 rounded-lg">
             <p className="text-sm text-gray-700">
               <strong>アクセスコード:</strong> {currentAccessCode}
               <span className="ml-2 text-gray-500">（このコードで他の端末からもアクセスできます）</span>
