@@ -24,6 +24,7 @@ function App() {
   // Firestore保存のデバウンス用
   const saveTimeoutRef = useRef<NodeJS.Timeout>()
   const isInitialLoadRef = useRef(true)
+  const hasLoadedFromFirestore = useRef(false)
 
   // アクセスコードの確認とログイン
   const handleLogin = (e: React.FormEvent) => {
@@ -55,6 +56,8 @@ function App() {
     setEntries([])
     setConnectionStatus('disconnected')
     setStatusMessage('')
+    isInitialLoadRef.current = true
+    hasLoadedFromFirestore.current = false
     localStorage.removeItem('timecardAccessCode')
   }
 
@@ -71,6 +74,10 @@ function App() {
   // Firestoreからデータをリアルタイムで取得
   useEffect(() => {
     if (!isAuthenticated || !currentAccessCode || !db) return
+
+    // 認証時にフラグをリセット
+    isInitialLoadRef.current = true
+    hasLoadedFromFirestore.current = false
 
     console.log('Setting up Firestore listener for:', currentAccessCode)
     const docRef = doc(db, 'timecards', currentAccessCode)
@@ -106,7 +113,13 @@ function App() {
           })
         }
 
-        isInitialLoadRef.current = false
+        // 初回データ読み込み完了
+        hasLoadedFromFirestore.current = true
+        // 次回からは保存を許可
+        setTimeout(() => {
+          isInitialLoadRef.current = false
+          console.log('Initial load complete, saving enabled')
+        }, 100)
       },
       (error) => {
         console.error('Firestore listener error:', error)
@@ -119,6 +132,10 @@ function App() {
           try {
             setEntries(JSON.parse(savedEntries))
             setStatusMessage('LocalStorageから読み込みました（オフライン）')
+            hasLoadedFromFirestore.current = true
+            setTimeout(() => {
+              isInitialLoadRef.current = false
+            }, 100)
           } catch (e) {
             console.error('Failed to parse localStorage data:', e)
           }
@@ -129,13 +146,22 @@ function App() {
     return () => {
       console.log('Cleaning up Firestore listener')
       unsubscribe()
+      isInitialLoadRef.current = true
+      hasLoadedFromFirestore.current = false
     }
   }, [isAuthenticated, currentAccessCode])
 
   // データが変更されたらFirestoreに保存（デバウンス付き）
   useEffect(() => {
-    // 初期ロード時はスキップ
-    if (isInitialLoadRef.current || !isAuthenticated || !currentAccessCode || !db) {
+    // 初期ロード時、または Firestore からデータを読み込む前はスキップ
+    if (isInitialLoadRef.current || !hasLoadedFromFirestore.current || !isAuthenticated || !currentAccessCode || !db) {
+      console.log('Skipping save:', {
+        isInitial: isInitialLoadRef.current,
+        hasLoaded: hasLoadedFromFirestore.current,
+        isAuth: isAuthenticated,
+        hasCode: !!currentAccessCode,
+        hasDb: !!db
+      })
       return
     }
 
