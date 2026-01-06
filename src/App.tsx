@@ -1,8 +1,14 @@
 import { useState, useEffect } from 'react'
-import { Calendar, Clock, DollarSign, Download, Trash2, Plus, User, Copy } from 'lucide-react'
+import { Calendar, Clock, DollarSign, Download, Trash2, Plus, User, Copy, Key, LogOut } from 'lucide-react'
 import { TimeCardEntry } from './types'
+import { db } from './firebase'
+import { doc, setDoc, onSnapshot } from 'firebase/firestore'
 
 function App() {
+  const [accessCode, setAccessCode] = useState('')
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [currentAccessCode, setCurrentAccessCode] = useState('')
+
   const [entries, setEntries] = useState<TimeCardEntry[]>([])
   const [date, setDate] = useState(() => {
     const today = new Date()
@@ -13,18 +19,87 @@ function App() {
   const [endTime, setEndTime] = useState('')
   const [hourlyWage, setHourlyWage] = useState<number>(1000)
 
-  // LocalStorageからデータを読み込む
+  // アクセスコードの確認とログイン
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (accessCode.trim().length < 4) {
+      alert('アクセスコードは4文字以上で入力してください')
+      return
+    }
+    setCurrentAccessCode(accessCode.trim())
+    setIsAuthenticated(true)
+    localStorage.setItem('timecardAccessCode', accessCode.trim())
+  }
+
+  // ログアウト
+  const handleLogout = () => {
+    setIsAuthenticated(false)
+    setCurrentAccessCode('')
+    setAccessCode('')
+    setEntries([])
+    localStorage.removeItem('timecardAccessCode')
+  }
+
+  // 起動時に保存されたアクセスコードを確認
   useEffect(() => {
-    const savedEntries = localStorage.getItem('timecardEntries')
-    if (savedEntries) {
-      setEntries(JSON.parse(savedEntries))
+    const savedCode = localStorage.getItem('timecardAccessCode')
+    if (savedCode) {
+      setAccessCode(savedCode)
+      setCurrentAccessCode(savedCode)
+      setIsAuthenticated(true)
     }
   }, [])
 
-  // データが変更されたらLocalStorageに保存
+  // Firestoreからデータをリアルタイムで取得
   useEffect(() => {
-    localStorage.setItem('timecardEntries', JSON.stringify(entries))
-  }, [entries])
+    if (!isAuthenticated || !currentAccessCode) return
+
+    const docRef = doc(db, 'timecards', currentAccessCode)
+
+    // リアルタイムリスナーを設定
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data()
+        setEntries(data.entries || [])
+      } else {
+        // ドキュメントが存在しない場合は作成
+        setDoc(docRef, { entries: [] })
+        setEntries([])
+      }
+    }, (error) => {
+      console.error('Firestore error:', error)
+      // エラーが発生した場合はLocalStorageから読み込む
+      const savedEntries = localStorage.getItem('timecardEntries')
+      if (savedEntries) {
+        setEntries(JSON.parse(savedEntries))
+      }
+    })
+
+    return () => unsubscribe()
+  }, [isAuthenticated, currentAccessCode])
+
+  // データが変更されたらFirestoreに保存
+  useEffect(() => {
+    if (!isAuthenticated || !currentAccessCode || entries.length === 0) return
+
+    const saveToFirestore = async () => {
+      try {
+        const docRef = doc(db, 'timecards', currentAccessCode)
+        await setDoc(docRef, {
+          entries,
+          lastUpdated: new Date().toISOString()
+        })
+        // バックアップとしてLocalStorageにも保存
+        localStorage.setItem('timecardEntries', JSON.stringify(entries))
+      } catch (error) {
+        console.error('Failed to save to Firestore:', error)
+        // Firestoreに保存できない場合はLocalStorageに保存
+        localStorage.setItem('timecardEntries', JSON.stringify(entries))
+      }
+    }
+
+    saveToFirestore()
+  }, [entries, isAuthenticated, currentAccessCode])
 
   // 勤務時間と日当を計算
   const calculatePay = (start: string, end: string, wage: number) => {
@@ -168,15 +243,86 @@ function App() {
     document.body.removeChild(link)
   }
 
+  // ログイン画面
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-12 px-4 flex items-center justify-center">
+        <div className="max-w-md w-full">
+          <div className="bg-white rounded-2xl shadow-xl p-8">
+            <div className="text-center mb-8">
+              <Key className="w-16 h-16 mx-auto mb-4 text-indigo-600" />
+              <h1 className="text-3xl font-bold text-gray-800 mb-2">
+                居酒屋タイムカード
+              </h1>
+              <p className="text-gray-600">アクセスコードを入力してください</p>
+            </div>
+
+            <form onSubmit={handleLogin} className="space-y-6">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  アクセスコード
+                </label>
+                <input
+                  type="text"
+                  value={accessCode}
+                  onChange={(e) => setAccessCode(e.target.value)}
+                  placeholder="例: myshop2024"
+                  className="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
+                  required
+                  minLength={4}
+                />
+                <p className="text-sm text-gray-500 mt-2">
+                  ※ 同じアクセスコードを使えば、どの端末からも同じデータにアクセスできます
+                </p>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-6 rounded-lg text-lg transition duration-200 flex items-center justify-center gap-2 shadow-lg"
+              >
+                <Key className="w-6 h-6" />
+                ログイン
+              </button>
+            </form>
+
+            <div className="mt-6 p-4 bg-blue-50 rounded-lg">
+              <p className="text-sm text-gray-700">
+                <strong>使い方：</strong><br />
+                好きなアクセスコードを入力してください。同じコードを使えば、PC、スマホ、タブレットなど、どの端末からも同じデータにアクセスできます。
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-6 px-4">
       <div className="max-w-6xl mx-auto">
         {/* ヘッダー */}
         <div className="bg-white rounded-2xl shadow-xl p-6 mb-6">
-          <h1 className="text-3xl md:text-4xl font-bold text-gray-800 text-center mb-2">
-            居酒屋タイムカード
-          </h1>
-          <p className="text-center text-gray-600">給与計算システム</p>
+          <div className="flex justify-between items-center">
+            <div>
+              <h1 className="text-3xl md:text-4xl font-bold text-gray-800 mb-2">
+                居酒屋タイムカード
+              </h1>
+              <p className="text-gray-600">給与計算システム</p>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 flex items-center gap-2"
+            >
+              <LogOut className="w-4 h-4" />
+              ログアウト
+            </button>
+          </div>
+          <div className="mt-4 p-3 bg-indigo-50 rounded-lg">
+            <p className="text-sm text-gray-700">
+              <strong>アクセスコード:</strong> {currentAccessCode}
+              <span className="ml-2 text-gray-500">（このコードで他の端末からもアクセスできます）</span>
+            </p>
+          </div>
         </div>
 
         {/* 合計金額表示 */}
