@@ -1,17 +1,24 @@
 import { useState, useEffect, useRef } from 'react'
-import { Calendar, Clock, DollarSign, Download, Trash2, Plus, User, Copy, Key, LogOut, WifiOff, Wifi, AlertCircle } from 'lucide-react'
+import { Calendar, Clock, DollarSign, Download, Trash2, Plus, User, Copy, Upload, Save } from 'lucide-react'
 import { TimeCardEntry } from './types'
-import { db, isFirebaseConfigured } from './firebase'
-import { doc, setDoc, onSnapshot } from 'firebase/firestore'
+
+// LocalStorageから初期データを読み込む
+const loadInitialEntries = (): TimeCardEntry[] => {
+  try {
+    const savedEntries = localStorage.getItem('timecardEntries')
+    if (savedEntries) {
+      const parsed = JSON.parse(savedEntries)
+      console.log('Loaded from localStorage:', parsed.length, 'entries')
+      return parsed
+    }
+  } catch (e) {
+    console.error('Failed to parse localStorage data:', e)
+  }
+  return []
+}
 
 function App() {
-  const [accessCode, setAccessCode] = useState('')
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [currentAccessCode, setCurrentAccessCode] = useState('')
-  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'error'>('disconnected')
-  const [statusMessage, setStatusMessage] = useState('')
-
-  const [entries, setEntries] = useState<TimeCardEntry[]>([])
+  const [entries, setEntries] = useState<TimeCardEntry[]>(loadInitialEntries)
   const [date, setDate] = useState(() => {
     const today = new Date()
     return today.toISOString().split('T')[0]
@@ -20,198 +27,19 @@ function App() {
   const [startTime, setStartTime] = useState('')
   const [endTime, setEndTime] = useState('')
   const [hourlyWage, setHourlyWage] = useState<number>(1000)
+  const isInitialMount = useRef(true)
 
-  // Firestore保存のデバウンス用
-  const saveTimeoutRef = useRef<NodeJS.Timeout>()
-  const isInitialLoadRef = useRef(true)
-  const hasLoadedFromFirestore = useRef(false)
-
-  // アクセスコードの確認とログイン
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (accessCode.trim().length < 4) {
-      alert('アクセスコードは4文字以上で入力してください')
+  // データが変更されたらLocalStorageに保存
+  useEffect(() => {
+    // 初回マウント時はスキップ
+    if (isInitialMount.current) {
+      isInitialMount.current = false
       return
     }
 
-    if (!isFirebaseConfigured()) {
-      const confirmLogin = window.confirm(
-        'Firebase設定が完了していません。\n' +
-        'データはブラウザのLocalStorageのみに保存され、他の端末と共有できません。\n\n' +
-        'それでもログインしますか？'
-      )
-      if (!confirmLogin) return
-    }
-
-    setCurrentAccessCode(accessCode.trim())
-    setIsAuthenticated(true)
-    localStorage.setItem('timecardAccessCode', accessCode.trim())
-  }
-
-  // ログアウト
-  const handleLogout = () => {
-    setIsAuthenticated(false)
-    setCurrentAccessCode('')
-    setAccessCode('')
-    setEntries([])
-    setConnectionStatus('disconnected')
-    setStatusMessage('')
-    isInitialLoadRef.current = true
-    hasLoadedFromFirestore.current = false
-    localStorage.removeItem('timecardAccessCode')
-  }
-
-  // 起動時に保存されたアクセスコードを確認
-  useEffect(() => {
-    const savedCode = localStorage.getItem('timecardAccessCode')
-    if (savedCode) {
-      setAccessCode(savedCode)
-      setCurrentAccessCode(savedCode)
-      setIsAuthenticated(true)
-    }
-  }, [])
-
-  // Firestoreからデータをリアルタイムで取得
-  useEffect(() => {
-    if (!isAuthenticated || !currentAccessCode || !db) return
-
-    // 認証時にフラグをリセット
-    isInitialLoadRef.current = true
-    hasLoadedFromFirestore.current = false
-
-    console.log('Setting up Firestore listener for:', currentAccessCode)
-    const docRef = doc(db, 'timecards', currentAccessCode)
-
-    // リアルタイムリスナーを設定
-    const unsubscribe = onSnapshot(
-      docRef,
-      (docSnap) => {
-        console.log('Firestore snapshot received:', docSnap.exists())
-        setConnectionStatus('connected')
-        setStatusMessage('クラウドに接続されています')
-
-        if (docSnap.exists()) {
-          const data = docSnap.data()
-          console.log('Data from Firestore:', data.entries?.length || 0, 'entries')
-          setEntries(data.entries || [])
-          // LocalStorageにもバックアップ
-          localStorage.setItem('timecardEntries', JSON.stringify(data.entries || []))
-        } else {
-          console.log('Document does not exist, creating new one')
-          // ドキュメントが存在しない場合は空で作成
-          setDoc(docRef, {
-            entries: [],
-            createdAt: new Date().toISOString(),
-            lastUpdated: new Date().toISOString()
-          }).then(() => {
-            console.log('New document created')
-            setEntries([])
-          }).catch((error) => {
-            console.error('Failed to create document:', error)
-            setConnectionStatus('error')
-            setStatusMessage('ドキュメント作成エラー: ' + error.message)
-          })
-        }
-
-        // 初回データ読み込み完了
-        hasLoadedFromFirestore.current = true
-        // 次回からは保存を許可
-        setTimeout(() => {
-          isInitialLoadRef.current = false
-          console.log('Initial load complete, saving enabled')
-        }, 100)
-      },
-      (error) => {
-        console.error('Firestore listener error:', error)
-        setConnectionStatus('error')
-        setStatusMessage('Firebase接続エラー: ' + error.message)
-
-        // エラーが発生した場合はLocalStorageから読み込む
-        const savedEntries = localStorage.getItem('timecardEntries')
-        if (savedEntries) {
-          try {
-            setEntries(JSON.parse(savedEntries))
-            setStatusMessage('LocalStorageから読み込みました（オフライン）')
-            hasLoadedFromFirestore.current = true
-            setTimeout(() => {
-              isInitialLoadRef.current = false
-            }, 100)
-          } catch (e) {
-            console.error('Failed to parse localStorage data:', e)
-          }
-        }
-      }
-    )
-
-    return () => {
-      console.log('Cleaning up Firestore listener')
-      unsubscribe()
-      isInitialLoadRef.current = true
-      hasLoadedFromFirestore.current = false
-    }
-  }, [isAuthenticated, currentAccessCode])
-
-  // データが変更されたらFirestoreに保存（デバウンス付き）
-  useEffect(() => {
-    // 初期ロード時、または Firestore からデータを読み込む前はスキップ
-    if (isInitialLoadRef.current || !hasLoadedFromFirestore.current || !isAuthenticated || !currentAccessCode || !db) {
-      console.log('Skipping save:', {
-        isInitial: isInitialLoadRef.current,
-        hasLoaded: hasLoadedFromFirestore.current,
-        isAuth: isAuthenticated,
-        hasCode: !!currentAccessCode,
-        hasDb: !!db
-      })
-      return
-    }
-
-    console.log('Data changed, scheduling save...', entries.length, 'entries')
-
-    // 既存のタイマーをクリア
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current)
-    }
-
-    // 500ms後に保存（デバウンス）
-    saveTimeoutRef.current = setTimeout(async () => {
-      try {
-        const docRef = doc(db, 'timecards', currentAccessCode)
-        console.log('Saving to Firestore:', entries.length, 'entries')
-
-        await setDoc(docRef, {
-          entries,
-          lastUpdated: new Date().toISOString()
-        }, { merge: true })
-
-        console.log('Successfully saved to Firestore')
-        setConnectionStatus('connected')
-        setStatusMessage('保存完了')
-
-        // バックアップとしてLocalStorageにも保存
-        localStorage.setItem('timecardEntries', JSON.stringify(entries))
-
-        // 3秒後にメッセージをクリア
-        setTimeout(() => {
-          if (statusMessage === '保存完了') {
-            setStatusMessage('クラウドに接続されています')
-          }
-        }, 3000)
-      } catch (error: any) {
-        console.error('Failed to save to Firestore:', error)
-        setConnectionStatus('error')
-        setStatusMessage('保存エラー: ' + error.message)
-
-        // Firestoreに保存できない場合はLocalStorageに保存
-        localStorage.setItem('timecardEntries', JSON.stringify(entries))
-      }
-    }, 500)
-
-    return () => {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current)
-      }
-    }
-  }, [entries, isAuthenticated, currentAccessCode])
+    console.log('Saving to localStorage:', entries.length, 'entries')
+    localStorage.setItem('timecardEntries', JSON.stringify(entries))
+  }, [entries])
 
   // 勤務時間と日当を計算
   const calculatePay = (start: string, end: string, wage: number) => {
@@ -355,102 +183,67 @@ function App() {
     document.body.removeChild(link)
   }
 
-  // 接続ステータス表示コンポーネント
-  const ConnectionStatusBadge = () => {
-    if (!isAuthenticated) return null
-
-    let icon
-    let bgColor
-    let textColor
-
-    switch (connectionStatus) {
-      case 'connected':
-        icon = <Wifi className="w-4 h-4" />
-        bgColor = 'bg-green-100'
-        textColor = 'text-green-800'
-        break
-      case 'error':
-        icon = <AlertCircle className="w-4 h-4" />
-        bgColor = 'bg-red-100'
-        textColor = 'text-red-800'
-        break
-      default:
-        icon = <WifiOff className="w-4 h-4" />
-        bgColor = 'bg-gray-100'
-        textColor = 'text-gray-800'
+  // JSONバックアップをダウンロード
+  const handleDownloadBackup = () => {
+    if (entries.length === 0) {
+      alert('バックアップするデータがありません')
+      return
     }
 
-    return (
-      <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${bgColor} ${textColor}`}>
-        {icon}
-        <span className="text-sm font-medium">{statusMessage || '接続中...'}</span>
-      </div>
-    )
+    const backupData = {
+      version: '1.0',
+      exportDate: new Date().toISOString(),
+      entries: entries
+    }
+
+    const jsonContent = JSON.stringify(backupData, null, 2)
+    const blob = new Blob([jsonContent], { type: 'application/json;charset=utf-8;' })
+    const link = document.createElement('a')
+    const url = URL.createObjectURL(blob)
+
+    link.setAttribute('href', url)
+    link.setAttribute('download', `timecard_backup_${new Date().toISOString().split('T')[0]}.json`)
+    link.style.visibility = 'hidden'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+
+    alert('バックアップファイルをダウンロードしました。このファイルを安全な場所に保存してください。')
   }
 
-  // ログイン画面
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-12 px-4 flex items-center justify-center">
-        <div className="max-w-md w-full">
-          <div className="bg-white rounded-2xl shadow-xl p-8">
-            <div className="text-center mb-8">
-              <Key className="w-16 h-16 mx-auto mb-4 text-indigo-600" />
-              <h1 className="text-3xl font-bold text-gray-800 mb-2">
-                居酒屋タイムカード
-              </h1>
-              <p className="text-gray-600">アクセスコードを入力してください</p>
-            </div>
+  // JSONバックアップから復元
+  const handleRestoreBackup = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
 
-            {!isFirebaseConfigured() && (
-              <div className="mb-6 p-4 bg-yellow-50 border-2 border-yellow-200 rounded-lg">
-                <div className="flex gap-2">
-                  <AlertCircle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
-                  <div className="text-sm text-yellow-800">
-                    <strong>Firebase未設定:</strong> データはこのブラウザのみに保存されます。他の端末と共有するには、READMEの手順に従ってFirebaseを設定してください。
-                  </div>
-                </div>
-              </div>
-            )}
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const content = e.target?.result as string
+        const backupData = JSON.parse(content)
 
-            <form onSubmit={handleLogin} className="space-y-6">
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-2">
-                  アクセスコード
-                </label>
-                <input
-                  type="text"
-                  value={accessCode}
-                  onChange={(e) => setAccessCode(e.target.value)}
-                  placeholder="例: myshop2024"
-                  className="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
-                  required
-                  minLength={4}
-                />
-                <p className="text-sm text-gray-500 mt-2">
-                  ※ 同じアクセスコードを使えば、どの端末からも同じデータにアクセスできます
-                </p>
-              </div>
+        if (!backupData.entries || !Array.isArray(backupData.entries)) {
+          alert('無効なバックアップファイルです')
+          return
+        }
 
-              <button
-                type="submit"
-                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-6 rounded-lg text-lg transition duration-200 flex items-center justify-center gap-2 shadow-lg"
-              >
-                <Key className="w-6 h-6" />
-                ログイン
-              </button>
-            </form>
+        const confirmRestore = window.confirm(
+          `${backupData.entries.length}件のデータを復元します。\n現在のデータは上書きされますがよろしいですか？\n\nバックアップ日時: ${new Date(backupData.exportDate).toLocaleString('ja-JP')}`
+        )
 
-            <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-              <p className="text-sm text-gray-700">
-                <strong>使い方：</strong><br />
-                好きなアクセスコードを入力してください。同じコードを使えば、PC、スマホ、タブレットなど、どの端末からも同じデータにアクセスできます。
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    )
+        if (confirmRestore) {
+          setEntries(backupData.entries)
+          alert('データを復元しました')
+        }
+      } catch (error) {
+        console.error('Failed to restore backup:', error)
+        alert('バックアップファイルの読み込みに失敗しました')
+      }
+    }
+    reader.readAsText(file)
+
+    // ファイル選択をリセット（同じファイルを再度選択できるようにする）
+    event.target.value = ''
   }
 
   return (
@@ -463,24 +256,32 @@ function App() {
               <h1 className="text-3xl md:text-4xl font-bold text-gray-800 mb-2">
                 居酒屋タイムカード
               </h1>
-              <p className="text-gray-600">給与計算システム</p>
-            </div>
-            <div className="flex gap-2">
-              <ConnectionStatusBadge />
-              <button
-                onClick={handleLogout}
-                className="bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 flex items-center gap-2"
-              >
-                <LogOut className="w-4 h-4" />
-                ログアウト
-              </button>
+              <p className="text-gray-600">給与計算システム（ローカル版）</p>
             </div>
           </div>
-          <div className="p-3 bg-indigo-50 rounded-lg">
-            <p className="text-sm text-gray-700">
-              <strong>アクセスコード:</strong> {currentAccessCode}
-              <span className="ml-2 text-gray-500">（このコードで他の端末からもアクセスできます）</span>
+          <div className="p-3 bg-blue-50 rounded-lg">
+            <p className="text-sm text-gray-700 mb-3">
+              データはこのブラウザのLocalStorageに保存されます。定期的にバックアップを取ることをおすすめします。
             </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleDownloadBackup}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 flex items-center gap-2 text-sm"
+              >
+                <Save className="w-4 h-4" />
+                バックアップを保存
+              </button>
+              <label className="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 flex items-center gap-2 text-sm cursor-pointer">
+                <Upload className="w-4 h-4" />
+                バックアップから復元
+                <input
+                  type="file"
+                  accept=".json"
+                  onChange={handleRestoreBackup}
+                  className="hidden"
+                />
+              </label>
+            </div>
           </div>
         </div>
 
