@@ -24,9 +24,9 @@ function App() {
     return today.toISOString().split('T')[0]
   })
   const [staffName, setStaffName] = useState('')
-  const [startTime, setStartTime] = useState('')
-  const [endTime, setEndTime] = useState('')
-  const [hourlyWage, setHourlyWage] = useState<number>(1000)
+  const [startTime, setStartTime] = useState('18:00')
+  const [endTime, setEndTime] = useState('22:00')
+  const [hourlyWage, setHourlyWage] = useState<number>(1200)
   const isInitialMount = useRef(true)
 
   // データが変更されたらLocalStorageに保存
@@ -89,8 +89,8 @@ function App() {
 
     // フォームをリセット
     setStaffName('')
-    setStartTime('')
-    setEndTime('')
+    setStartTime('18:00')
+    setEndTime('22:00')
   }
 
   // エントリーを削除
