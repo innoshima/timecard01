@@ -127,7 +127,7 @@ function App() {
       const dateObj = new Date(entry.date + 'T00:00:00')
       const month = dateObj.getMonth() + 1
       const day = dateObj.getDate()
-      return `${month}/${day}　${entry.staffName}　　${entry.startTime}〜${entry.endTime} (${entry.workHours.toFixed(1)}時間) × ${entry.hourlyWage.toLocaleString()}円 = ${entry.dailyPay.toLocaleString()}円`
+      return `${month}/${day}　${entry.staffName}　　${entry.startTime}〜${entry.endTime} (${entry.workHours.toFixed(2)}時間) × ${entry.hourlyWage.toLocaleString()}円 = ${entry.dailyPay.toLocaleString()}円`
     })
 
     lines.push('')
@@ -425,7 +425,7 @@ function App() {
                         const day = dateObj.getDate()
                         return (
                           <div key={entry.id} className="text-sm text-gray-700 font-mono bg-gray-50 p-2 rounded">
-                            {month}/{day} {entry.startTime}〜{entry.endTime} ({entry.workHours.toFixed(1)}h) × ¥{entry.hourlyWage.toLocaleString()} = ¥{entry.dailyPay.toLocaleString()}
+                            {month}/{day} {entry.startTime}〜{entry.endTime} ({entry.workHours.toFixed(2)}h) × ¥{entry.hourlyWage.toLocaleString()} = ¥{entry.dailyPay.toLocaleString()}
                           </div>
                         )
                       })
